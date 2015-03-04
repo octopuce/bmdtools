@@ -46,9 +46,11 @@ void print_display_mode(IDeckLinkDisplayMode *displayMode, int index)
     modeHeight = displayMode->GetHeight();
     displayMode->GetFrameRate(&frameRateDuration, &frameRateScale);
 
-    printf("        %2d:   %-20s \t %d x %d \t %7g FPS\n",
+    printf("        %2d:   %-20s \t %d x %d \t %7g FPS (%5g / %5g)\n",
            index, ToStr(str), modeWidth, modeHeight,
-           (double)frameRateScale / (double)frameRateDuration);
+           (double)frameRateScale / (double)frameRateDuration,
+           (double)frameRateScale , (double)frameRateDuration
+            );
 
     FreeStr(str);
 }

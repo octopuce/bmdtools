@@ -28,7 +28,7 @@ prefix ?= /usr
 bindir ?= $(prefix)/bin
 
 CXX = g++
-SDK_PATH = ../../include
+SDK_PATH = ../include
 
 SYS=$(shell uname)
 
@@ -38,7 +38,7 @@ CXXFLAGS = `pkg-config --cflags $(PKG_DEPS)` -D__STDC_CONSTANT_MACROS
 LDFLAGS  = `pkg-config --libs $(PKG_DEPS)`
 
 CXXFLAGS+= -Wno-multichar -I $(SDK_PATH) -fno-rtti -g
-LDFLAGS += -lm -ldl -lpthread
+LDFLAGS += -lm -ldl -lpthread -lrt
 
 ifeq ($(SYS), Darwin)
 CXXFLAGS+= -framework CoreFoundation -DHAVE_CFSTRING

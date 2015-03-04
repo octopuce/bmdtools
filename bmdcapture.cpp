@@ -73,7 +73,7 @@ typedef struct AVPacketQueue {
 static AVPacketQueue queue;
 
 static AVPacket flush_pkt;
-
+    
 static void avpacket_queue_init(AVPacketQueue *q)
 {
     memset(q, 0, sizeof(AVPacketQueue));
@@ -378,6 +378,38 @@ HRESULT DeckLinkCaptureDelegate::VideoInputFrameArrived(
     BMDTimeValue frameDuration;
     time_t cur_time;
 
+    static int audioSamplesPerFrame=0; // duration unit of an audio frame
+    static struct timespec ts_start, ts_now; // timestamp at frame0, and current timestamp
+    static double frameDurationSec=0; // duration (in second) of a video frame
+    static int totalDuplicated=0, totalDropped=0;
+    double wallSec=0; // number of seconds (+ milliseconds) passing since startup
+    double deltaPic; // Difference between the wallclock and the number of frames.
+    int duplicate,drop;
+    
+    if (frameCount==0) {
+        clock_gettime(CLOCK_MONOTONIC, &ts_start);
+        frameDurationSec = ((double)frameRateDuration) / ((double)frameRateScale);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &ts_now);
+    wallSec=ts_now.tv_sec-ts_start.tv_sec + ((double)(ts_now.tv_nsec-ts_start.tv_nsec))/1000000000;
+    deltaPic = wallSec - frameCount*((double)frameRateDuration ) / ((double)frameRateScale);
+
+    // Shall we duplicate or drop this frame to adjust for wall-clock realtime ? 
+    duplicate = (deltaPic>frameDurationSec);
+    drop = (deltaPic<-frameDurationSec);
+    if (duplicate) {
+        totalDuplicated++;
+        fprintf(stderr,"Will DUPLICATE a frame (normal duration %f) duplicated: %d frameCount:%d deltaPic:%f\n",frameDurationSec,totalDuplicated,frameCount,deltaPic);
+    }
+    if (drop) {
+        totalDropped++;
+        fprintf(stderr,"Will DROP a frame (normal duration %f) dropped: %d frameCount: %d deltaPic: %f\n",frameDurationSec,totalDropped,frameCount,deltaPic);
+    }
+    
+    if (drop) {
+        return S_OK; // we don't do anything ;) 
+    }
+    
     frameCount++;
 
     // Handle Video Frame
@@ -400,6 +432,19 @@ HRESULT DeckLinkCaptureDelegate::VideoInputFrameArrived(
                                   video_st->time_base.den);
 
         if (videoFrame->GetFlags() & bmdFrameHasNoInputSource) {
+            // new behavior : if there is no image, we SKIP instead of returning BARS...
+            if (frameCount>1) {
+                frameCount--;
+                time(&cur_time);
+                fprintf(stderr,"%s "
+                        "Frame received (#%lu) - No input signal detected "
+                        "- Frames dropped %u - Total dropped %u\n",
+                        ctime(&cur_time),
+                        frameCount, ++dropped, ++totaldropped);
+                return S_OK;
+            }
+                
+            
             unsigned bars[8] = {
                 0xEA80EA80, 0xD292D210, 0xA910A9A5, 0x90229035,
                 0x6ADD6ACA, 0x51EF515A, 0x286D28EF, 0x10801080 };
@@ -440,6 +485,10 @@ HRESULT DeckLinkCaptureDelegate::VideoInputFrameArrived(
         }
 
         pkt.pts -= initial_video_pts;
+        if (true) { // replace it by g_wallclock_sync option
+            pkt.pts = c->frame_number;
+        }
+        
         pkt.dts = pkt.pts;
 
         pkt.duration = frameDuration;
@@ -448,11 +497,34 @@ HRESULT DeckLinkCaptureDelegate::VideoInputFrameArrived(
         pkt.stream_index = video_st->index;
         pkt.data         = (uint8_t *)frameBytes;
         pkt.size         = videoFrame->GetRowBytes() *
-                           videoFrame->GetHeight();
+                  videoFrame->GetHeight();
+        if (g_verbose) {
+            fprintf(stderr,
+                    "Video Frame received (#%lu) pts:%d dts:%d duration:%d durationSec:%f wallSec:%f deltaPic:%f\n",
+                    c->frame_number,
+                    pkt.pts, pkt.dts, pkt.duration,
+                    frameDurationSec, wallSec, deltaPic
+                    );
+        }
         //fprintf(stderr,"Video Frame size %d ts %d\n", pkt.size, pkt.pts);
+
         c->frame_number++;
         avpacket_queue_put(&queue, &pkt);
-
+        if (duplicate) {
+            AVPacket pkt2;
+            av_init_packet(&pkt2);
+            pkt2.pts = c->frame_number;
+            pkt2.dts = pkt2.pts;
+            // copy the rest...
+            pkt2.duration = pkt.duration;
+            pkt2.flags = pkt.flags;
+            pkt2.stream_index = pkt.stream_index;
+            pkt2.data = pkt.data;
+            pkt2.size = pkt.size;
+            c->frame_number++;
+            avpacket_queue_put(&queue, &pkt2);
+        }
+        
 
     }
 
@@ -474,22 +546,51 @@ HRESULT DeckLinkCaptureDelegate::VideoInputFrameArrived(
         if (initial_audio_pts == AV_NOPTS_VALUE) {
             initial_audio_pts = pkt.pts;
         }
-
+        if (frameCount==1) {
+            // remember the PTS of first frame 
+            audioSamplesPerFrame = audioFrame->GetSampleFrameCount();
+            fprintf(stderr,
+                    "First Audio Frame received (#%lu) audioSamplesPerFrame: %d\n",
+                    c->frame_number,
+                    audioSamplesPerFrame
+                    );
+        }
         pkt.pts -= initial_audio_pts;
+        if (true) { // replace it by g_wallclock_sync 
+            pkt.pts = audioSamplesPerFrame*c->frame_number;
+        }
         pkt.dts = pkt.pts;
-
         //fprintf(stderr,"Audio Frame size %d ts %d\n", pkt.size, pkt.pts);
         pkt.flags       |= AV_PKT_FLAG_KEY;
         pkt.stream_index = audio_st->index;
         pkt.data         = (uint8_t *)audioFrameBytes;
         //pkt.size= avcodec_encode_audio(c, audio_outbuf, audio_outbuf_size, samples);
+
         c->frame_number++;
-        //write(audioOutputFile, audioFrameBytes, audioFrame->GetSampleFrameCount() * g_audioChannels * (g_audioSampleDepth / 8));
-/*            if (av_interleaved_write_frame(oc, &pkt) != 0) {
- *          fprintf(stderr, "Error while writing audio frame\n");
- *          exit(1);
- *      } */
         avpacket_queue_put(&queue, &pkt);
+        if (duplicate) {
+            AVPacket pkt2;
+            av_init_packet(&pkt2);
+            pkt2.pts = audioSamplesPerFrame*c->frame_number;
+            pkt2.dts = pkt2.pts;
+            // copy the rest...
+            pkt2.flags = pkt.flags;
+            pkt2.stream_index = pkt.stream_index;
+            pkt2.data = pkt.data;
+            pkt2.size = pkt.size;
+            c->frame_number++;
+            avpacket_queue_put(&queue, &pkt2);
+            // IMPORTANT
+            frameCount++;
+        }
+        if (g_verbose) {
+            fprintf(stderr,
+                    "Audio Frame received (#%lu) pts:%d dts:%d duration:%d\n",
+                    c->frame_number,
+                    pkt.pts, pkt.dts, pkt.duration
+                    );
+        }
+
     }
 
     if (serial_fd > 0) {
